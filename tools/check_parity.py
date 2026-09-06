@@ -81,7 +81,6 @@ def metal_generate(
     batch_size: int = 1,
 ) -> list[dict]:
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    os.environ["VLLM_METAL_USE_PAGED_ATTENTION"] = "1"
     os.environ.setdefault("VLLM_METAL_MEMORY_FRACTION", "0.3")
     from vllm import LLM, SamplingParams
 
