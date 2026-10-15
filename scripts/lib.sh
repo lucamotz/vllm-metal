@@ -126,6 +126,13 @@ ensure_metal_toolchain() {
     return 0
   fi
 
+  if ! xcodebuild -version &> /dev/null; then
+    error "Compiling .metallib needs full Xcode, not only the Command Line Tools."
+    error "Install Xcode, then run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer && sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch"
+    rm -rf "${tmpdir}"
+    return 1
+  fi
+
   echo "Metal toolchain not available, downloading via xcodebuild..."
   xcodebuild -downloadComponent MetalToolchain
 
