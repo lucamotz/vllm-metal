@@ -195,6 +195,12 @@ def apply_pipeline_split(model: nn.Module, pp: PipelineGroup) -> tuple[int, int]
     return start, end
 
 
+# A long prefill step submits each layer as it is built: a stage's whole
+# forward in a few command buffers can run for seconds and trip the Metal GPU
+# watchdog (kIOGPUCommandBufferCallbackErrorTimeout).
+_LAYER_COMMIT_MIN_TOKENS = 1024
+
+
 def is_glm5_next(model: Any) -> bool:
     """Whether ``model`` is mlx-vlm's GLM-5-Next text model."""
     return getattr(model, "model_type", None) == "glm5_next_text"
@@ -342,6 +348,8 @@ class PipelinedModel:
         topk = None
         for layer, layer_cache in zip(backbone.layers, layer_caches, strict=True):
             h, topk = layer(h, None, layer_cache, topk)
+            if h.shape[1] >= _LAYER_COMMIT_MIN_TOKENS:
+                mx.async_eval(h)
         if self._pp.is_last:
             return linear(self._model.lm_head, backbone.norm(h.mean(axis=2)))
         return self._check_wire_dtype(h.reshape(*h.shape[:2], -1))

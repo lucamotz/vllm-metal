@@ -481,12 +481,14 @@ def _micro_glm5_next() -> nn.Module:
 
 
 class TestHyperConnectionStages:
-    def test_two_stages_reproduce_the_full_model_logits(self) -> None:
+    # 184 repeats make a prefill step long enough to submit each layer early.
+    @pytest.mark.parametrize("repeats", [1, 184])
+    def test_two_stages_reproduce_the_full_model_logits(self, repeats: int) -> None:
         # GLM-5-Next keeps hc_mult residual streams between layers, so the wire
         # must carry all of them for the split to match the unsplit model.
         mx.random.seed(0)
         full = _micro_glm5_next()
-        input_ids = mx.array([[1, 5, 9, 2, 7, 3]])
+        input_ids = mx.array([[1, 5, 9, 2, 7, 3] * repeats])
         expected = full(input_ids).logits
 
         stages = []
@@ -499,5 +501,5 @@ class TestHyperConnectionStages:
         wire = stages[0]._stage_forward(input_ids, None)
         logits = stages[1]._stage_forward(input_ids, wire)
 
-        assert wire.shape == (1, 6, stages[1]._wire_hidden)
+        assert wire.shape == (1, 6 * repeats, stages[1]._wire_hidden)
         assert bool(mx.allclose(logits, expected, rtol=1e-5, atol=1e-5))
