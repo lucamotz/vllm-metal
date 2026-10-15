@@ -24,7 +24,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
     SlidingWindowSpec,
 )
 
-from tests.stub_runner import make_stub_runner  # noqa: E402
+from tests.stub_runner import make_nemotron_hybrid_plan, make_stub_runner  # noqa: E402
 from vllm_metal.attention.caches.placement import KV_CACHE_LAYOUT  # noqa: E402
 from vllm_metal.attention.runtime.hybrid import HybridPagedAttentionRuntime
 from vllm_metal.config import MetalConfig
@@ -281,6 +281,19 @@ class TestWorkerRunnerBoundaryDelegation:
         assert "overhead=0.10GB" in message
         assert "kv_budget=-0.60GB" in message
         assert "increase --gpu-memory-utilization (currently 0.15)" in message
+
+    @pytest.mark.parametrize(("pattern", "slots"), [("M*MM", 1), ("**MMM", 2)])
+    def test_hybrid_layout_budget_fits_metal_buffers(
+        self, monkeypatch: pytest.MonkeyPatch, pattern: str, slots: int
+    ) -> None:
+        """Each hybrid cache slot is imported as one Metal buffer."""
+        worker = self._make_layout_budget_worker(
+            monkeypatch, gpu_memory_utilization=0.5
+        )
+        worker.model_runner.hybrid_runtime_plan = make_nemotron_hybrid_plan(pattern)
+        monkeypatch.setattr(mx, "device_info", lambda: {"max_buffer_length": 10**9})
+
+        assert MetalWorker.determine_available_memory(worker) == slots * 10**9
 
     def test_layout_budget_skips_dense_block_floor(
         self, monkeypatch: pytest.MonkeyPatch
