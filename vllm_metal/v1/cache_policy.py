@@ -1216,6 +1216,18 @@ class WorkerCachePlanner:
             fraction,
             overhead,
         )
+        max_buffer = int(mx.device_info().get("max_buffer_length", 0))
+        hybrid_plan = (
+            self._worker.model_runner.hybrid_runtime_plan
+            if base_kv_budget > max_buffer > 0
+            else None
+        )
+        if hybrid_plan is not None:
+            # vLLM lays a hybrid cache out in as many slots as its minority
+            # layer type has layers, and imports each slot as one Metal buffer.
+            layers = hybrid_plan.layers
+            slots = max(1, min(layers.num_attention, layers.num_state))
+            base_kv_budget = min(base_kv_budget, max_buffer * slots)
         kv_offload_pool = self._resolve_kv_offload_pool(base_kv_budget, per_block_bytes)
         kv_budget = base_kv_budget - kv_offload_pool
         plan, room = self._probe_committed_pool(
