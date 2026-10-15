@@ -191,11 +191,12 @@ def test_budget_above_buffer_limit_uses_shared_regions(monkeypatch):
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 
-    from tests.stub_runner import make_cache_config
+    from tests.stub_runner import make_cache_config, make_nemotron_hybrid_plan
     from vllm_metal.tensor_bridge import torch_to_mlx
     from vllm_metal.v1.cache_policy import WorkerCachePlanner
 
-    groups = make_storage().config.kv_cache_groups
+    layout = make_storage()
+    groups = layout.config.kv_cache_groups
     buffer_limit = 16_384
     imported = []
 
@@ -210,9 +211,13 @@ def test_budget_above_buffer_limit_uses_shared_regions(monkeypatch):
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
         cache_config=make_cache_config(gpu_memory_utilization=0.5),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        kv_transfer_config=None,
+        speculative_config=None,
     )
     runner = SimpleNamespace(
         is_hybrid=True,
+        hybrid_runtime_plan=make_nemotron_hybrid_plan("**MM"),
         scheduler_memory_reporting_mode=lambda: "paged_attention_layout_budget",
         profile_run=lambda: 0,
     )
@@ -221,6 +226,7 @@ def test_budget_above_buffer_limit_uses_shared_regions(monkeypatch):
             model_runner=runner,
             vllm_config=config,
             get_cache_block_size_bytes=lambda: 1,
+            get_kv_cache_spec=lambda: layout.specs,
         )
     )
     monkeypatch.setattr(planner, "get_model_memory_usage", lambda: 0)

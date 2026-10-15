@@ -15,16 +15,21 @@ import torch
 pytest.importorskip("vllm", reason="vllm not installed")
 
 import vllm.v1.worker.worker_base as worker_base  # noqa: E402
-from vllm.config import CacheConfig, VllmConfig  # noqa: E402
+from vllm.config import AttentionConfig, CacheConfig, VllmConfig  # noqa: E402
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout  # noqa: E402
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheLayout,
+    MambaSpec,
     SlidingWindowSpec,
 )
 
-from tests.stub_runner import make_stub_runner  # noqa: E402
+from tests.stub_runner import (  # noqa: E402
+    make_cache_config,
+    make_nemotron_hybrid_plan,
+    make_stub_runner,
+)
 from vllm_metal.attention.caches.placement import KV_CACHE_LAYOUT  # noqa: E402
 from vllm_metal.attention.runtime.hybrid import HybridPagedAttentionRuntime
 from vllm_metal.config import MetalConfig
@@ -281,6 +286,49 @@ class TestWorkerRunnerBoundaryDelegation:
         assert "overhead=0.10GB" in message
         assert "kv_budget=-0.60GB" in message
         assert "increase --gpu-memory-utilization (currently 0.15)" in message
+
+    @pytest.mark.parametrize(
+        ("num_attention", "num_state", "regions"),
+        [(1, 3, 1), (2, 5, 2), (4, 5, 5)],
+        ids=["one_attention_layer", "groups_of_two", "padded_to_five"],
+    )
+    def test_hybrid_layout_budget_fits_metal_buffers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        num_attention: int,
+        num_state: int,
+        regions: int,
+    ) -> None:
+        """Each region of vLLM's hybrid layout is imported as one Metal buffer."""
+        worker = self._make_layout_budget_worker(
+            monkeypatch, gpu_memory_utilization=0.5
+        )
+        attention = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16
+        )
+        state = MambaSpec(
+            block_size=16,
+            shapes=((2, 4), (1, 4, 32)),
+            dtypes=(torch.float16, torch.float32),
+            page_size_padded=attention.page_size_bytes,
+            mamba_cache_mode="align",
+        )
+        specs = {f"layers.{i}.self_attn": attention for i in range(num_attention)}
+        specs |= {f"layers.{num_attention + i}.mixer": state for i in range(num_state)}
+        worker.model_runner.hybrid_runtime_plan = make_nemotron_hybrid_plan(
+            "*" * num_attention + "M" * num_state
+        )
+        worker.get_kv_cache_spec = lambda: specs
+        worker.vllm_config = SimpleNamespace(
+            cache_config=make_cache_config(gpu_memory_utilization=0.5),
+            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+            kv_transfer_config=None,
+            speculative_config=None,
+            attention_config=AttentionConfig(),
+        )
+        monkeypatch.setattr(mx, "device_info", lambda: {"max_buffer_length": 10**8})
+
+        assert MetalWorker.determine_available_memory(worker) == regions * 10**8
 
     def test_layout_budget_skips_dense_block_floor(
         self, monkeypatch: pytest.MonkeyPatch

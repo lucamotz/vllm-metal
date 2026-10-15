@@ -1207,6 +1207,20 @@ class WorkerCachePlanner:
             fraction,
             overhead,
         )
+        max_buffer = int(mx.device_info().get("max_buffer_length", 0))
+        if (
+            base_kv_budget > max_buffer > 0
+            and self._worker.model_runner.hybrid_runtime_plan is not None
+        ):
+            from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+
+            # vLLM lays a hybrid cache out in one region per layer slot of its
+            # groups; KVCacheStorage imports each region as one Metal buffer.
+            groups = get_kv_cache_groups(
+                self._worker.vllm_config, dict(self._worker.get_kv_cache_spec())
+            )
+            regions = max(len(group.layer_names) for group in groups)
+            base_kv_budget = min(base_kv_budget, max_buffer * regions)
         kv_offload_pool = self._resolve_kv_offload_pool(base_kv_budget, per_block_bytes)
         kv_budget = base_kv_budget - kv_offload_pool
         plan, room = self._probe_committed_pool(
