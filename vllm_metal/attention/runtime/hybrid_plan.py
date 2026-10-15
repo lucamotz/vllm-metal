@@ -9,7 +9,7 @@ owner in ``families/`` builds all three into one ``HybridRuntimePlan``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, TypeAlias
 
 import mlx.nn as nn
@@ -158,6 +158,10 @@ class HybridRuntimePlan:
                 f"{len(self.geometry.state_shapes)} tensors, but upstream resolved "
                 f"{len(self.state_dtypes)} state dtypes"
             )
+
+    def for_layers(self, start: int, end: int) -> HybridRuntimePlan:
+        """Restrict the plan to layers ``[start, end)``, one pipeline stage."""
+        return replace(self, layers=HybridLayerPlan(self.layers.layer_roles[start:end]))
 
     def state_cache_spec(
         self,
