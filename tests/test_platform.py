@@ -367,6 +367,7 @@ class TestMetalPlatform:
                     enable_chunked_prefill=True,
                     max_num_batched_tokens=2048,
                     max_num_scheduled_tokens=None,
+                    scheduler_cls=None,
                 ),
                 speculative_config=None,
                 lora_config=None,
@@ -385,6 +386,9 @@ class TestMetalPlatform:
             assert (
                 vllm_config.parallel_config.worker_cls
                 == "vllm_metal.v1.worker.MetalWorker"
+            )
+            assert vllm_config.scheduler_config.scheduler_cls == (
+                "vllm_metal.v1.pipeline_scheduler.PipelineBalancedScheduler"
             )
         finally:
             reset_config()
