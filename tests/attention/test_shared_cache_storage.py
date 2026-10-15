@@ -191,7 +191,7 @@ def test_budget_above_buffer_limit_uses_shared_regions(monkeypatch):
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 
-    from tests.stub_runner import make_cache_config
+    from tests.stub_runner import make_cache_config, make_nemotron_hybrid_plan
     from vllm_metal.tensor_bridge import torch_to_mlx
     from vllm_metal.v1.cache_policy import WorkerCachePlanner
 
@@ -213,6 +213,7 @@ def test_budget_above_buffer_limit_uses_shared_regions(monkeypatch):
     )
     runner = SimpleNamespace(
         is_hybrid=True,
+        hybrid_runtime_plan=make_nemotron_hybrid_plan("**MM"),
         scheduler_memory_reporting_mode=lambda: "paged_attention_layout_budget",
         profile_run=lambda: 0,
     )
