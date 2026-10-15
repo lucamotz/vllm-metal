@@ -447,3 +447,38 @@ class TestDummyForwardMlxLmContract:
 
         assert out.shape == (1, 4, 32)
         assert out.dtype == wrapper._wire_dtype
+
+
+class TestPipelineBalancedScheduler:
+    @pytest.mark.parametrize(("num_in_flight", "deferred"), [(0, ["b"]), (1, [])])
+    def test_ready_decodes_fill_one_batch_per_stage(
+        self, monkeypatch: pytest.MonkeyPatch, num_in_flight: int, deferred: list[str]
+    ) -> None:
+        """With no decode in flight, half the ready ones wait for the next batch."""
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        from vllm_metal.v1.pipeline_scheduler import PipelineBalancedScheduler
+
+        def decoding(request_id: str, num_computed_tokens: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                request_id=request_id,
+                num_prompt_tokens=4,
+                num_tokens_with_spec=6,
+                num_computed_tokens=num_computed_tokens,
+                next_decode_eligible_step=0,
+            )
+
+        scheduler = PipelineBalancedScheduler.__new__(PipelineBalancedScheduler)
+        scheduler.running = [decoding("a", 5), decoding("b", 5)]
+        scheduler.running += [decoding("c", 6)] * num_in_flight
+        scheduler.current_step = 7
+        scheduler.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(pipeline_parallel_size=2)
+        )
+        monkeypatch.setattr(Scheduler, "schedule", lambda self, throttle=False: None)
+
+        scheduler.schedule()
+
+        assert [
+            r.request_id for r in scheduler.running if r.next_decode_eligible_step
+        ] == deferred

@@ -1059,6 +1059,16 @@ class MetalPlatform(Platform):
                 "pipeline_parallel_size=1 or an MLX-LM safetensors checkpoint."
             )
 
+        # One batch is in flight per pipeline stage; spread decode requests
+        # over those batches instead of leaving all but one stage idle.
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and scheduler_config.scheduler_cls is None
+        ):
+            scheduler_config.scheduler_cls = (
+                "vllm_metal.v1.pipeline_scheduler.PipelineBalancedScheduler"
+            )
+
         # LoRA cannot wrap the GGUFLinear layers the GGUF loader installs.
         if vllm_config.lora_config is not None and model_config.quantization == "gguf":
             raise NotImplementedError(

@@ -161,6 +161,7 @@ mlx.launch -n 2 --backend ring tools/pp_parity_check.py Qwen/Qwen3-0.6B
 - **Checkpoint loading.** PP lazily slices MLX-LM safetensors; AWQ and GGUF are rejected because their loaders materialize the full model before slicing.
 - **Co-located stages oversubscribe the KV budget.** Each stage applies `--gpu-memory-utilization` to the whole device independently; neither knows the other exists, so two stages on one Mac claim roughly twice the fraction. Lower it when stacking. Separate Macs are unaffected.
 - **Synchronous scheduling required.** vLLM disables async scheduling for PP by default; an explicit `--async-scheduling` fails loud.
+- **Scheduler.** Under PP, vllm-metal defaults `--scheduler-cls` to `vllm_metal.v1.pipeline_scheduler.PipelineBalancedScheduler`, which spreads ready decode requests over the stages; pass `--scheduler-cls vllm.v1.core.sched.scheduler.Scheduler` to use vLLM's.
 - **TP=1 only.** PP+TP is rejected; tensor parallelism (`--tensor-parallel-size > 1`) is not implemented.
 - **Model support.** YOCO / hybrid / MLA / pooling / VLM / speculative decoding / LoRA are rejected; other shapes (sliding-window, MoE) are untested.
 
