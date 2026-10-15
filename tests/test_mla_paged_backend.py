@@ -12,6 +12,7 @@ import pytest
 import torch
 from mlx_lm.models.base import scaled_dot_product_attention
 
+import vllm_metal.attention.impls.dsa as dsa
 import vllm_metal.attention.runtime.mla as mla_runtime
 from tests.stub_runner import initialize_hybrid_runtime, make_bailing_hybrid_plan
 from vllm_metal.attention import context as pac
@@ -629,10 +630,20 @@ class TestMLAPagedAttentionWrapperPagedPath:
             mx.array_equal(rebound.latent_caches[0], paged_cache.latent_caches[0])
         )
 
-    def test_glm5_next_sparse_layer_matches_mlx_vlm_across_steps(self) -> None:
+    # The latent case runs its prefill chunks, one with history, through the
+    # long-context path.
+    @pytest.mark.parametrize(
+        ("steps", "latent_prefill"),
+        [((11, 5, 1, 1, 1), False), ((11, 9, 1, 1), True)],
+    )
+    def test_glm5_next_sparse_layer_matches_mlx_vlm_across_steps(
+        self, monkeypatch, steps: tuple[int, ...], latent_prefill: bool
+    ) -> None:
         """Chunked prefill then decode past ``index_topk``, so the pooled
         indexer selects a subset rebuilt from the paged rows of earlier steps,
         including a history that ends on a pool boundary."""
+        if latent_prefill:
+            monkeypatch.setattr(dsa, "_LATENT_PREFILL_MIN_CONTEXT", 0)
         from mlx_vlm.models.cache import CacheList, KVCache, PoolingCache
         from mlx_vlm.models.glm5_next.config import TextConfig
         from mlx_vlm.models.glm5_next.language import Glm5NextAttention
@@ -668,7 +679,7 @@ class TestMLAPagedAttentionWrapperPagedPath:
         wrapper = DSAPagedAttentionWrapper(inner, 0, latent_cache)
 
         offset = 0
-        for num_tokens in (11, 5, 1, 1, 1):
+        for num_tokens in steps:
             x = mx.random.normal((1, num_tokens, 32))
             expected, _ = inner(x, cache=reference)
             pac.set_context(
