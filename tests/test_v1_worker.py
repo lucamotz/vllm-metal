@@ -282,8 +282,18 @@ class TestWorkerRunnerBoundaryDelegation:
         assert "kv_budget=-0.60GB" in message
         assert "increase --gpu-memory-utilization (currently 0.15)" in message
 
+    @pytest.mark.parametrize(
+        "per_block_bytes",
+        [
+            # 2.9 GB budget / 1 GB dense blocks = 2 blocks, under the 16-block
+            # floor the capacity path enforces.
+            pytest.param(1_000_000_000, id="under_dense_block_floor"),
+            # A pipeline stage holding only state layers.
+            pytest.param(0, id="no_attention_layers"),
+        ],
+    )
     def test_layout_budget_skips_dense_block_floor(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, per_block_bytes: int
     ) -> None:
         """A small positive budget is reported, not rejected, on this path.
 
@@ -294,9 +304,7 @@ class TestWorkerRunnerBoundaryDelegation:
         worker = self._make_layout_budget_worker(
             monkeypatch, gpu_memory_utilization=0.5
         )
-        # 2.9 GB budget / 1 GB dense blocks = 2 blocks, under the 16-block
-        # floor the capacity path enforces.
-        worker.get_cache_block_size_bytes = MagicMock(return_value=1_000_000_000)
+        worker.get_cache_block_size_bytes = MagicMock(return_value=per_block_bytes)
 
         assert MetalWorker.determine_available_memory(worker) == 2_900_000_000
 

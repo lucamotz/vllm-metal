@@ -471,6 +471,17 @@ class TestHybridPatchModel:
         assert gdn_0._gdn_state_cache is runtime.state_cache
         assert gdn_2._gdn_state_cache is runtime.state_cache
 
+    def test_stage_without_attention_layers_patches_its_state_layers(self) -> None:
+        runtime = HybridPagedAttentionRuntime(
+            hybrid_plan=_make_tiny_plan().for_layers(0, 1), dtype=mx.float32
+        )
+        initialize_hybrid_runtime(runtime, 2)
+        model = _FakeModel("s")
+
+        assert runtime.patch_model(model) == 1
+        assert runtime.kv_scheduler_group_indices() == ()
+        assert isinstance(model.layers[0].linear_attn, GDNPagedAttentionWrapper)
+
     def test_bailing_patches_mla_and_kda_on_shared_storage(self) -> None:
         args = BailingModelArgs(
             hidden_size=16,

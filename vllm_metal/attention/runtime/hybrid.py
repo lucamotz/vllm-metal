@@ -40,6 +40,8 @@ logger = init_logger(__name__)
 class HybridPagedAttentionRuntime(PagedAttentionRuntimeBase):
     """Execute attention and state layers through their registered wrappers."""
 
+    _initialized = False
+
     def __init__(
         self,
         *,
@@ -66,6 +68,12 @@ class HybridPagedAttentionRuntime(PagedAttentionRuntimeBase):
         self._scheduler_group_indices: tuple[int, ...] = ()
         self._group_block_sizes: tuple[int, ...] = ()
 
+    def _require_initialized(self, caller: str) -> Any:
+        # A pipeline stage holding only state layers has no attention cache.
+        if not self._initialized:
+            raise RuntimeError(f"{caller}() called before initialize()")
+        return self._cache
+
     def initialize_from_config(self, config: KVCacheConfig) -> None:
         """Use the upstream allocation for both KV and recurrent state."""
         self.storage = KVCacheStorage(config)
@@ -80,7 +88,9 @@ class HybridPagedAttentionRuntime(PagedAttentionRuntimeBase):
         ]
         attention_specs = [self.storage.specs[name] for name in attention_names]
         mla_layers = [isinstance(spec, MLAAttentionSpec) for spec in attention_specs]
-        if all(mla_layers):
+        if not attention_names:
+            self._cache = None
+        elif all(mla_layers):
             self._cache = MLAPagedLatentCache.from_upstream(
                 self.storage, attention_names
             )
@@ -124,6 +134,7 @@ class HybridPagedAttentionRuntime(PagedAttentionRuntimeBase):
             state_spec.block_size,
             mamba_cache_mode=state_spec.mamba_cache_mode,
         )
+        self._initialized = True
         logger.info(
             "Hybrid shared cache: %d blocks, %.2f GiB backing for KV and state",
             config.num_blocks,

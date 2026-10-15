@@ -363,6 +363,11 @@ def kv_pool_bytes_after_probe(
     return min(plan_bytes, max(0, cap))
 
 
+def _dense_blocks(budget: int, per_block_bytes: int) -> int:
+    # A pipeline stage holding only state layers has no attention block bytes.
+    return max(0, budget // per_block_bytes) if per_block_bytes else 0
+
+
 class ModelCachePolicy:
     """Cache shape, size, and backend-selection policy for one runner."""
 
@@ -1223,7 +1228,7 @@ class WorkerCachePlanner:
                 overhead=overhead,
                 per_block_bytes=per_block_bytes,
                 kv_budget=kv_budget,
-                num_blocks=max(0, kv_budget // per_block_bytes),
+                num_blocks=_dense_blocks(kv_budget, per_block_bytes),
                 kv_offload_pool=kv_offload_pool,
             ),
             future_reserved_bytes=future_reserved_bytes,
@@ -1238,7 +1243,7 @@ class WorkerCachePlanner:
                 plan = replace(
                     plan,
                     kv_budget=room - pool,
-                    num_blocks=(room - pool) // per_block_bytes,
+                    num_blocks=_dense_blocks(room - pool, per_block_bytes),
                     kv_offload_pool=pool,
                 )
         return plan
@@ -1419,7 +1424,7 @@ class WorkerCachePlanner:
         # layout from the bytes it is handed, so rounding here to the dense
         # per-block estimate would throw away capacity the layout can use.
         # ``num_blocks`` is the count-based path's allocation size.
-        num_blocks = fit // plan.per_block_bytes
+        num_blocks = _dense_blocks(fit, plan.per_block_bytes)
         logger.warning(
             "Paged attention: KV cache sized down from %.2f GB to %.2f GB "
             "(%d blocks): the machine paged memory out to back a sample, so it "

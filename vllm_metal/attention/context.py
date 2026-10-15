@@ -330,8 +330,9 @@ def prepare_grouped(
 
     set_context(
         PagedAttentionContext(
-            slot_mapping=kv_groups[0].slot_mapping,
-            block_tables=kv_groups[0].block_tables,
+            # A pipeline stage holding only state layers has no KV group.
+            slot_mapping=kv_groups[0].slot_mapping if kv_groups else [],
+            block_tables=kv_groups[0].block_tables if kv_groups else [],
             context_lens=context_lens,
             cu_seqlens=cu_seqlens,
             offsets=offsets,

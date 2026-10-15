@@ -344,6 +344,17 @@ class TestPrepareGrouped:
         assert ctx.slot_mapping == ctx.kv_groups[0].slot_mapping
         assert ctx.block_tables == ctx.kv_groups[0].block_tables
 
+    def test_stage_without_kv_groups_keeps_segment_metadata(self):
+        # A pipeline stage holding only state layers has no KV cache group.
+        prepare_grouped([([], 17, 1)], [([], 2, 0)], ())
+
+        ctx = get_context()
+
+        assert ctx is not None
+        assert ctx.kv_groups == ()
+        assert ctx.cu_seqlens == [0, 1, 3]
+        assert ctx.context_lens == [18, 2]
+
     def test_repeats_decode_table_for_each_verification_token(self):
         prepare_grouped([([[3], [8, 9]], 17, 2)], [], (32, 16))
 
