@@ -60,6 +60,7 @@ from vllm_metal.attention.context import (
     get_context,
     prepare_grouped,
 )
+from vllm_metal.attention.impls.dsa import indexer_cache_dim
 from vllm_metal.attention.impls.gdn_lazy import GDNLazyKernels
 from vllm_metal.attention.impls.gdn_spec import apply_spec_decode_acceptance
 from vllm_metal.attention.impls.mla import MLA_DEFAULT_QK_ROPE_HEAD_DIM
@@ -636,15 +637,17 @@ class MetalModelRunner:
 
     @property
     def mla_latent_dim(self) -> int:
-        """Combined latent dimension for MLA cache: kv_lora_rank + qk_rope_head_dim.
+        """Per-token MLA cache width: latent, RoPE key and any indexer columns.
 
         Only valid when is_mla is True. Derived directly from model_args so
         callers do not depend on resolved runtime head_dim overrides.
         """
         if not self.is_mla:
             raise AttributeError("mla_latent_dim is only valid for MLA models")
-        return int(self.model_args["kv_lora_rank"]) + int(
-            self.model_args.get("qk_rope_head_dim", MLA_DEFAULT_QK_ROPE_HEAD_DIM)
+        return (
+            int(self.model_args["kv_lora_rank"])
+            + int(self.model_args.get("qk_rope_head_dim", MLA_DEFAULT_QK_ROPE_HEAD_DIM))
+            + indexer_cache_dim(self.model_args)
         )
 
     def validate_paged_attention_support(self) -> None:

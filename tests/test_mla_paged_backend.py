@@ -16,6 +16,7 @@ import vllm_metal.attention.runtime.mla as mla_runtime
 from tests.stub_runner import initialize_hybrid_runtime, make_bailing_hybrid_plan
 from vllm_metal.attention import context as pac
 from vllm_metal.attention.caches.mla_cache import MLAPagedLatentCache
+from vllm_metal.attention.impls.dsa import DSAPagedAttentionWrapper
 from vllm_metal.attention.impls.mla import MLAPagedAttentionWrapper
 from vllm_metal.attention.runtime.hybrid import HybridPagedAttentionRuntime
 from vllm_metal.attention.runtime.mla import MLAPagedAttentionRuntime
@@ -627,6 +628,63 @@ class TestMLAPagedAttentionWrapperPagedPath:
         assert bool(
             mx.array_equal(rebound.latent_caches[0], paged_cache.latent_caches[0])
         )
+
+    def test_glm5_next_sparse_layer_matches_mlx_vlm_across_steps(self) -> None:
+        """Chunked prefill then decode past ``index_topk``, so the pooled
+        indexer selects a subset rebuilt from the paged rows of earlier steps,
+        including a history that ends on a pool boundary."""
+        from mlx_vlm.models.cache import CacheList, KVCache, PoolingCache
+        from mlx_vlm.models.glm5_next.config import TextConfig
+        from mlx_vlm.models.glm5_next.language import Glm5NextAttention
+
+        mx.random.seed(31)
+        config = TextConfig(
+            hidden_size=32,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            q_lora_rank=16,
+            kv_lora_rank=16,
+            qk_nope_head_dim=8,
+            qk_head_dim=8,
+            v_head_dim=8,
+            index_n_heads=2,
+            index_head_dim=8,
+            index_topk=8,
+            index_kpool=4,
+            num_hidden_layers=4,
+        )
+        inner = Glm5NextAttention(config, layer_idx=3)
+        indexer = inner.indexer
+        indexer.index_kpool_compress_ape = mx.random.normal((4, 8))
+        indexer.index_kpool_compress_gate = mx.random.normal((8, 32))
+        reference = CacheList(KVCache(), KVCache(), PoolingCache(4), KVCache())
+        latent_cache = MLAPagedLatentCache(
+            num_layers=1,
+            latent_dim=16 + 2 * 8,
+            num_blocks=8,
+            block_size=4,
+            dtype=mx.float32,
+        )
+        wrapper = DSAPagedAttentionWrapper(inner, 0, latent_cache)
+
+        offset = 0
+        for num_tokens in (11, 5, 1, 1, 1):
+            x = mx.random.normal((1, num_tokens, 32))
+            expected, _ = inner(x, cache=reference)
+            pac.set_context(
+                pac.PagedAttentionContext(
+                    slot_mapping=list(range(offset, offset + num_tokens)),
+                    block_tables=[list(range(8))],
+                    context_lens=[offset + num_tokens],
+                    offsets=[offset],
+                    cu_seqlens=[0, num_tokens],
+                )
+            )
+            actual, _ = wrapper(x)
+            pac.clear_context()
+            offset += num_tokens
+
+            assert bool(mx.allclose(actual, expected, rtol=1e-5, atol=1e-5))
 
 
 # Single-pass kernel dimensions (matches mla.metal instantiation).
