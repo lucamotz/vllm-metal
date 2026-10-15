@@ -126,13 +126,12 @@ checkpoints converted from it. Direct loading of the official serialized
 block-FP8 checkpoint is not supported.
 
 GLM-5.3-Flash loads through mlx-vlm's `glm5_next` text model and serves text
-only; pass `--limit-mm-per-prompt '{"image":0,"video":0}'`. The verified
-checkpoint was converted from `zai-org/GLM-5.3-Flash-BF16` with
-`mlx_vlm.convert`: routed experts 4-bit affine (`down_proj` 5-bit), other
-linear layers 8-bit affine, group size 64, hyper-connection and indexer
-modules unquantized. A custom `quant_predicate` replaces mlx-vlm's own, so it
-must keep that predicate's exclusions (`attn_hc`, `ffn_hc`,
-`index_kpool_compress`).
+only; image and video requests are refused. The verified checkpoint was
+converted from `zai-org/GLM-5.3-Flash-BF16` with `mlx_vlm.convert`: routed
+experts 4-bit affine (`down_proj` 5-bit), other linear layers 8-bit affine,
+group size 64, hyper-connection and indexer modules unquantized. A custom
+`quant_predicate` replaces mlx-vlm's own, so it must keep that predicate's
+exclusions (`attn_hc`, `ffn_hc`, `index_kpool_compress`).
 
 | Model | MLX | PyTorch MPS | Attention Kernel | Automatic Prefix Cache | Example checkpoint |
 | --- | --- | --- | --- | --- | --- |
