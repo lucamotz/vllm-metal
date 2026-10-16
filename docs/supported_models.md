@@ -134,6 +134,18 @@ group size 64, hyper-connection and indexer modules unquantized. A custom
 `quant_predicate` replaces mlx-vlm's own, so it must keep that predicate's
 exclusions (`attn_hc`, `ffn_hc`, `index_kpool_compress`).
 
+Each step, GLM-5.3-Flash's sparse attention layers gather every request's past
+rows from the paged cache, so their memory grows with the context. As vLLM does
+for its sparse-attention workspace, the worker reserves one allowance for them
+before sizing the KV cache, enough for one request of `--max-model-len` (logged
+at startup as `Sparse MLA: reserving ... MiB`), and evaluates a step early when
+its gathered rows would exceed it. The indexer scores a prefill chunk's queries
+a few rows at a time, so its float32 scores stay within vLLM's
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB` (512 MiB by default), which the reserve
+includes. Past 32,768 tokens of context, which is mlx-vlm's own bound on its
+projected prefill, prefill chunks attend over the latent rows instead of
+projecting every past row to per-head keys and values.
+
 | Model | MLX | PyTorch MPS | Attention Kernel | Automatic Prefix Cache | Example checkpoint |
 | --- | --- | --- | --- | --- | --- |
 | Qwen3 | ✅ | 🔵 | GQA (paged) | ✅ | `Qwen/Qwen3-0.6B` |

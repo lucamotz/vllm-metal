@@ -30,6 +30,11 @@ from vllm_metal.attention.caches.turboquant import (
     packed_dim,
     prefill_workspace_bytes,
 )
+from vllm_metal.attention.impls.dsa import (
+    _INDEXER_SCORE_BYTES,
+    gather_workspace_bytes,
+    indexer_cache_dim,
+)
 from vllm_metal.attention.impls.turboquant_prefill import (
     dtype_head_reason,
     workspace_upper_bound,
@@ -407,6 +412,30 @@ class ModelCachePolicy:
                     value_bits=V_QUANT_PARAMS[config.v_quant]["bits"],
                 )
         return prefill_workspace_bytes(max_bytes=cap)
+
+    @cached_property
+    def dsa_workspace_bytes(self) -> int:
+        """The sparse-MLA gather allowance, resolved once before KV sizing."""
+        args = self._runner.model_args
+        if not indexer_cache_dim(args):
+            return 0
+        head_dims = int(args["qk_nope_head_dim"]) + int(args["v_head_dim"])
+        return gather_workspace_bytes(
+            max_model_len=self._runner.model_config.max_model_len,
+            latent_dim=self._runner.mla_latent_dim,
+            projected_dim=int(args["num_attention_heads"]) * head_dims,
+            itemsize=self._require_kv_cache_dtype().size,
+        )
+
+    @cached_property
+    def dsa_reserve_bytes(self) -> int:
+        """The gather allowance plus the indexer's score cap, reserved once
+        before KV sizing. The step's per-query-row activations need no share:
+        profile_run's dummy forward already measures them (274.5 MB for one
+        layer at 1024 rows, against 210.7 MB on a paged step past the cap)."""
+        if not self.dsa_workspace_bytes:
+            return 0
+        return self.dsa_workspace_bytes + _INDEXER_SCORE_BYTES
 
     def validate_paged_attention_support(self) -> None:
         """Validate that the loaded model can run on the paged-attention path."""
@@ -1200,6 +1229,17 @@ class WorkerCachePlanner:
                     "memory budget before KV sizing.",
                     workspace / 2**20,
                 )
+        # Nor can it observe the past rows sparse MLA gathers in a long step,
+        # or its indexer scores; they are reserved the same way.
+        dsa_reserve = self._worker.model_runner.dsa_reserve_bytes
+        if dsa_reserve:
+            overhead += dsa_reserve
+            future_reserved_bytes += dsa_reserve
+            logger.info_once(
+                "Sparse MLA: reserving %.2f MiB within the Metal memory budget "
+                "for one step's past rows and indexer scores, before KV sizing.",
+                dsa_reserve / 2**20,
+            )
         usable_metal = int(metal_limit * fraction)
         base_kv_budget = self.base_kv_budget_bytes(
             metal_limit,

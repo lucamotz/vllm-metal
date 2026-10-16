@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
     SlidingWindowSpec,
 )
 
+import vllm_metal.attention.impls.dsa as dsa  # noqa: E402
 from tests.stub_runner import make_stub_runner  # noqa: E402
 from vllm_metal.attention.caches.placement import KV_CACHE_LAYOUT  # noqa: E402
 from vllm_metal.attention.runtime.hybrid import HybridPagedAttentionRuntime
@@ -234,6 +235,7 @@ class TestWorkerRunnerBoundaryDelegation:
                 return_value="paged_attention_layout_budget"
             ),
             profile_run=MagicMock(return_value=overhead),
+            dsa_reserve_bytes=0,
         )
         worker = _make_worker(model_runner)
         worker.cache_config.gpu_memory_utilization = gpu_memory_utilization
@@ -558,6 +560,53 @@ class TestPagedAttentionPlanDiagnostics:
         assert plan.kv_budget == 2_900_000_000 - expected_mib * 2**20
         assert plan.overhead == 100_000_000 + expected_mib * 2**20
 
+    # At 16384 tokens the projected prefill path needs the most per request, at
+    # 262144 the latent path.
+    @pytest.mark.parametrize("max_model_len", [16384, 262144])
+    def test_sparse_mla_gather_allowance_is_reserved_inside_memory_fraction(
+        self, monkeypatch, max_model_len
+    ) -> None:
+        """Profiling has no paged history, so the rows GLM-5-Next's sparse layers
+        gather in a step are reserved up front, one request of max_model_len on
+        either prefill path, with the indexer's score cap on top."""
+        monkeypatch.setattr(
+            "vllm_metal.v1.cache_policy.get_config",
+            lambda: MetalConfig(mlx_device="gpu", turboquant=False),
+        )
+        runner = make_stub_runner(
+            model_args={
+                "kv_lora_rank": 32,
+                "qk_rope_head_dim": 0,
+                "index_head_dim": 8,
+                "index_kpool": 4,
+                "num_attention_heads": 4,
+                "qk_nope_head_dim": 16,
+                "v_head_dim": 16,
+            },
+            kv_cache_dtype=mx.bfloat16,
+        )
+        runner.model_config.max_model_len = max_model_len
+        planner = self._make_planner(runner, gpu_memory_utilization=0.5)
+        monkeypatch.setattr(
+            WorkerCachePlanner, "_metal_limit_bytes", lambda self: 10_000_000_000
+        )
+        monkeypatch.setattr(
+            WorkerCachePlanner, "get_model_memory_usage", lambda self: 2_000_000_000
+        )
+
+        allowance = runner.dsa_workspace_bytes
+        reserve = runner.dsa_reserve_bytes
+        plan = planner._paged_attention_plan(overhead=100_000_000)
+
+        latent_row = dsa.gathered_row_bytes(32 + 2 * 8, 2)
+        projected_row = dsa.gathered_row_bytes(32 + 2 * 8, 2, 4 * (16 + 16))
+        assert allowance >= max_model_len * latent_row
+        threshold = min(max_model_len, dsa._LATENT_PREFILL_MIN_CONTEXT)
+        assert allowance >= threshold * projected_row
+        assert reserve == allowance + dsa._INDEXER_SCORE_BYTES
+        assert plan.overhead == 100_000_000 + reserve
+        assert plan.kv_budget == 2_900_000_000 - reserve
+
     def _make_planner(
         self,
         model_runner: object,
@@ -575,6 +624,7 @@ class TestPagedAttentionPlanDiagnostics:
     def test_oom_mitigation_names_gpu_memory_utilization(self, monkeypatch) -> None:
         runner = SimpleNamespace(
             is_hybrid=False,
+            dsa_reserve_bytes=0,
         )
         planner = self._make_planner(runner, gpu_memory_utilization=0.15)
         monkeypatch.setattr(
@@ -598,6 +648,7 @@ class TestPagedAttentionPlanDiagnostics:
     def test_non_hybrid_oom_error_omits_gdn_reservation(self, monkeypatch) -> None:
         runner = SimpleNamespace(
             is_hybrid=False,
+            dsa_reserve_bytes=0,
         )
         planner = self._make_planner(runner, gpu_memory_utilization=0.1)
         monkeypatch.setattr(
@@ -857,6 +908,7 @@ class TestCommitProbeBudget:
             SimpleNamespace(
                 is_hybrid=False,
                 tq_prefill_workspace_bytes=turboquant_workspace,
+                dsa_reserve_bytes=0,
             )
         )
         worker.cache_config.gpu_memory_utilization = 0.5
@@ -1029,7 +1081,7 @@ class TestCommitProbeBudget:
         assert plan.kv_budget == _PLANNED_KV_BUDGET
 
     def test_probe_can_be_switched_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = _make_worker(SimpleNamespace(is_hybrid=False))
+        worker = _make_worker(SimpleNamespace(is_hybrid=False, dsa_reserve_bytes=0))
         worker.cache_config.gpu_memory_utilization = 0.5
         worker.get_cache_block_size_bytes = MagicMock(return_value=1_000_000)
         planner = WorkerCachePlanner(worker)

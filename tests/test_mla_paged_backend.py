@@ -12,6 +12,7 @@ import pytest
 import torch
 from mlx_lm.models.base import scaled_dot_product_attention
 
+import vllm_metal.attention.impls.dsa as dsa
 import vllm_metal.attention.runtime.mla as mla_runtime
 from tests.stub_runner import initialize_hybrid_runtime, make_bailing_hybrid_plan
 from vllm_metal.attention import context as pac
@@ -629,34 +630,24 @@ class TestMLAPagedAttentionWrapperPagedPath:
             mx.array_equal(rebound.latent_caches[0], paged_cache.latent_caches[0])
         )
 
-    def test_glm5_next_sparse_layer_matches_mlx_vlm_across_steps(self) -> None:
+    # The latent case runs its prefill chunks, one with history, through the
+    # long-context path.
+    @pytest.mark.parametrize(
+        ("steps", "latent_prefill"),
+        [((11, 5, 9, 1, 1), False), ((11, 9, 1, 1), True)],
+    )
+    def test_glm5_next_sparse_layer_matches_mlx_vlm_across_steps(
+        self, monkeypatch, steps: tuple[int, ...], latent_prefill: bool
+    ) -> None:
         """Chunked prefill then decode past ``index_topk``, so the pooled
         indexer selects a subset rebuilt from the paged rows of earlier steps,
         including a history that ends on a pool boundary."""
+        if latent_prefill:
+            monkeypatch.setattr(dsa, "_LATENT_PREFILL_MIN_CONTEXT", 0)
         from mlx_vlm.models.cache import CacheList, KVCache, PoolingCache
-        from mlx_vlm.models.glm5_next.config import TextConfig
-        from mlx_vlm.models.glm5_next.language import Glm5NextAttention
 
         mx.random.seed(31)
-        config = TextConfig(
-            hidden_size=32,
-            num_attention_heads=2,
-            num_key_value_heads=2,
-            q_lora_rank=16,
-            kv_lora_rank=16,
-            qk_nope_head_dim=8,
-            qk_head_dim=8,
-            v_head_dim=8,
-            index_n_heads=2,
-            index_head_dim=8,
-            index_topk=8,
-            index_kpool=4,
-            num_hidden_layers=4,
-        )
-        inner = Glm5NextAttention(config, layer_idx=3)
-        indexer = inner.indexer
-        indexer.index_kpool_compress_ape = mx.random.normal((4, 8))
-        indexer.index_kpool_compress_gate = mx.random.normal((8, 32))
+        inner = _glm5_next_sparse_layer()
         reference = CacheList(KVCache(), KVCache(), PoolingCache(4), KVCache())
         latent_cache = MLAPagedLatentCache(
             num_layers=1,
@@ -668,7 +659,7 @@ class TestMLAPagedAttentionWrapperPagedPath:
         wrapper = DSAPagedAttentionWrapper(inner, 0, latent_cache)
 
         offset = 0
-        for num_tokens in (11, 5, 1, 1, 1):
+        for num_tokens in steps:
             x = mx.random.normal((1, num_tokens, 32))
             expected, _ = inner(x, cache=reference)
             pac.set_context(
@@ -685,6 +676,125 @@ class TestMLAPagedAttentionWrapperPagedPath:
             offset += num_tokens
 
             assert bool(mx.allclose(actual, expected, rtol=1e-5, atol=1e-5))
+
+    # A score cap of one query row per part, and of five (parts of 5, 5 and 2).
+    @pytest.mark.parametrize("rows_per_part", [1, 5])
+    def test_glm5_next_indexer_scored_in_parts_selects_mlx_vlm_topk(
+        self, monkeypatch, rows_per_part: int
+    ) -> None:
+        """A prefill chunk's indexer queries scored a few rows at a time, each
+        part evaluated, select bitwise the top-k of mlx-vlm's single pass."""
+        mx.random.seed(41)
+        inner = _glm5_next_sparse_layer()
+        latent_cache = MLAPagedLatentCache(
+            num_layers=1,
+            latent_dim=32,
+            num_blocks=8,
+            block_size=4,
+            dtype=mx.float32,
+        )
+        latent_cache.latent_caches[0] = mx.random.normal((8, 4, 32))
+        wrapper = DSAPagedAttentionWrapper(inner, 0, latent_cache)
+        # 12 tokens after 17: 7 complete pools, of which the indexer keeps 2.
+        x = mx.random.normal((1, 12, 32))
+        ctx = pac.PagedAttentionContext(
+            slot_mapping=list(range(17, 29)),
+            block_tables=[list(range(8))],
+            context_lens=[29],
+            offsets=[17],
+            cu_seqlens=[0, 12],
+        )
+        q_a, _ = mx.split(inner.qkv_a_proj(x), (inner.q_lora_rank,), axis=-1)
+        q_resid = inner.q_a_layernorm(q_a)
+        _, valid, pool, _ = wrapper._request_caches(ctx, 0, 17)
+        expected = inner.indexer(x, q_resid, None, valid, pool, 17)
+        score_row = inner.indexer.n_heads * 7 * mx.float32.size
+        monkeypatch.setattr(dsa, "_INDEXER_SCORE_BYTES", rows_per_part * score_row)
+
+        _, _, pool, _ = wrapper._request_caches(ctx, 0, 17)
+        actual = wrapper._index_topk(x, q_resid, pool, 17)
+
+        assert bool(mx.array_equal(actual, expected))
+
+    def test_glm5_next_step_past_its_gather_allowance_is_evaluated_early(
+        self, monkeypatch
+    ) -> None:
+        """When the next request's rows would push the step past the reserved
+        allowance, the step so far is evaluated first; outputs and written rows
+        are those of the unbounded step."""
+        mx.random.seed(37)
+        inner = _glm5_next_sparse_layer()
+        history = mx.random.normal((16, 4, 32))
+        x = mx.random.normal((1, 4, 32))
+        # A decodes after 12 rows (blocks 0-3); B continues 3 tokens after 8 (4-7).
+        context = {
+            "slot_mapping": [12, 24, 25, 26],
+            "block_tables": [[0, 1, 2, 3], [4, 5, 6, 7]],
+            "context_lens": [13, 11],
+            "offsets": [12, 8],
+            "cu_seqlens": [0, 1, 4],
+            "num_decode_requests": 1,
+            "num_decode_tokens": 1,
+        }
+        syncs: list[None] = []
+        monkeypatch.setattr(dsa.mx, "synchronize", lambda: syncs.append(None))
+
+        def step(workspace_bytes: int) -> tuple[mx.array, mx.array]:
+            latent_cache = MLAPagedLatentCache(
+                num_layers=1,
+                latent_dim=32,
+                num_blocks=16,
+                block_size=4,
+                dtype=mx.float32,
+            )
+            latent_cache.latent_caches[0] = history
+            wrapper = DSAPagedAttentionWrapper(inner, 0, latent_cache)
+            pac.set_context(
+                pac.PagedAttentionContext(
+                    **context, dsa_workspace_bytes=workspace_bytes
+                )
+            )
+            try:
+                out, _ = wrapper(x)
+            finally:
+                pac.clear_context()
+            mx.eval(out, latent_cache.latent_caches[0])
+            return out, latent_cache.latent_caches[0]
+
+        unbounded = step(0)
+        assert syncs == []
+        # Room for A's 12 rows, not for B's 8 more.
+        bounded = step(12 * dsa.gathered_row_bytes(32, mx.float32.size))
+
+        assert len(syncs) == 1
+        assert bool(mx.array_equal(bounded[0], unbounded[0]))
+        assert bool(mx.array_equal(bounded[1], unbounded[1]))
+
+
+def _glm5_next_sparse_layer() -> nn.Module:
+    """A tiny GLM-5-Next sparse attention layer with its pooled indexer."""
+    from mlx_vlm.models.glm5_next.config import TextConfig
+    from mlx_vlm.models.glm5_next.language import Glm5NextAttention
+
+    config = TextConfig(
+        hidden_size=32,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        q_lora_rank=16,
+        kv_lora_rank=16,
+        qk_nope_head_dim=8,
+        qk_head_dim=8,
+        v_head_dim=8,
+        index_n_heads=2,
+        index_head_dim=8,
+        index_topk=8,
+        index_kpool=4,
+        num_hidden_layers=4,
+    )
+    inner = Glm5NextAttention(config, layer_idx=3)
+    inner.indexer.index_kpool_compress_ape = mx.random.normal((4, 8))
+    inner.indexer.index_kpool_compress_gate = mx.random.normal((8, 32))
+    return inner
 
 
 # Single-pass kernel dimensions (matches mla.metal instantiation).

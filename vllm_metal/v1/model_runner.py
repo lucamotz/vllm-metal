@@ -955,6 +955,14 @@ class MetalModelRunner:
     def tq_prefill_workspace_bytes(self) -> int:
         return self._cache_policy.tq_prefill_workspace_bytes
 
+    @property
+    def dsa_workspace_bytes(self) -> int:
+        return self._cache_policy.dsa_workspace_bytes
+
+    @property
+    def dsa_reserve_bytes(self) -> int:
+        return self._cache_policy.dsa_reserve_bytes
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get KV cache specification.
 
@@ -1536,6 +1544,7 @@ class MetalModelRunner:
             self._paged_group_block_sizes,
             merge_verify_windows=self.merge_verify_windows,
             tq_prefill_workspace_bytes=self.tq_prefill_workspace_bytes,
+            dsa_workspace_bytes=self.dsa_workspace_bytes,
         )
         try:
             ctx = get_context()
